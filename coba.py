@@ -37,22 +37,47 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 # 🛠️ 2. FUNGSI BANTU (HELPER FUNCTIONS)
 # ============================================================
 def send_email(recipient, subject, body):
-    """Fungsi untuk mengirim email"""
+    """Fungsi untuk mengirim email - VERSI DIPERBAIKI"""
     try:
+        logger.info(f"🔄 Attempting to send email to: {recipient}")
+        logger.info(f"📧 Using sender: {EMAIL_SENDER}")
+        
+        # Validasi credentials
+        if not EMAIL_SENDER or not EMAIL_PASSWORD:
+            logger.error("❌ Email credentials missing!")
+            return False
+        
         msg = EmailMessage()
         msg["From"] = EMAIL_SENDER
         msg["To"] = recipient
         msg["Subject"] = subject
         msg.set_content(body)
 
+        logger.info(f"📨 Connecting to SMTP server...")
+        
         with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.ehlo()
             server.starttls()
+            server.ehlo()
+            
+            logger.info(f"🔐 Attempting login...")
             server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+            logger.info(f"✅ Login successful!")
+            
             server.send_message(msg)
-        logger.info(f"✅ Email sent to {recipient}")
-        return True
+            logger.info(f"✅ Email sent successfully to {recipient}")
+            return True
+            
+    except smtplib.SMTPAuthenticationError as e:
+        logger.error(f"❌ SMTP Authentication Error: {e}")
+        logger.error("💡 Check your EMAIL_PASSWORD - it should be an APP PASSWORD, not your regular password")
+        return False
+    except smtplib.SMTPException as e:
+        logger.error(f"❌ SMTP Error: {e}")
+        return False
     except Exception as e:
-        logger.error(f"❌ Email error: {e}")
+        logger.error(f"❌ General email error: {e}")
+        logger.error(traceback.format_exc())
         return False
 
 def generate_invoice(prefix="INV"):
@@ -1153,7 +1178,7 @@ def home():
 
 @app.route("/register", methods=["GET", "POST"])
 def register():
-    """Halaman registrasi user baru - SEMUA USER BARU JADI ADMIN"""
+    """Halaman registrasi user baru - DIPERBAIKI ERROR HANDLING"""
     message = ""
     if request.method == "POST":
         name = request.form["name"]
@@ -1163,6 +1188,7 @@ def register():
         logger.info(f"🔄 Registrasi: {name} ({email})")
         
         try:
+            # Cek apakah email sudah terdaftar
             result = supabase.table("users").select("email").eq("email", email).execute()
             
             if result.data:
@@ -1171,6 +1197,7 @@ def register():
             else:
                 otp = str(random.randint(100000, 999999))
                 
+                # Simpan data di session
                 session['register_name'] = name
                 session['register_email'] = email
                 session['register_password'] = password
@@ -1193,15 +1220,26 @@ def register():
                 🌿 Tim Lelestari 🍃
                 """
                 
-                if send_email(email, "🌿 Kode OTP Lelestari", email_body):
+                # Coba kirim email dengan timeout
+                email_sent = send_email(email, "🌿 Kode OTP Lelestari", email_body)
+                
+                if email_sent:
                     logger.info(f"✅ OTP berhasil dikirim ke {email}")
                     return redirect('/verify')
                 else:
-                    message = '<div class="message error">❌ Gagal kirim OTP! Cek konfigurasi email.</div>'
+                    message = '''
+                    <div class="message error">
+                        ❌ Gagal kirim OTP! 
+                        <br><small>Kemungkinan masalah: 
+                        <br>- Konfigurasi email server
+                        <br>- App Password Gmail belum dibuat
+                        <br>- Environment variables belum diset</small>
+                    </div>
+                    '''
                     logger.error(f"❌ Gagal kirim OTP ke {email}")
                     
         except Exception as e:
-            message = f'<div class="message error">⚠ Error database: {str(e)}</div>'
+            message = f'<div class="message error">⚠ Error sistem: {str(e)}</div>'
             logger.error(f"Database error: {str(e)}")
     
     html = f"""
@@ -1213,6 +1251,16 @@ def register():
         <input type="password" name="password" placeholder="Password" required><br>
         <button type="submit">📝 Daftar & Kirim OTP</button>
     </form>
+    
+    <div style="margin-top: 20px; padding: 15px; background: #e7f3ff; border-radius: 8px;">
+        <h4>💡 Troubleshooting OTP:</h4>
+        <ul style="text-align: left;">
+            <li>Pastikan email yang dimasukkan valid</li>
+            <li>Cek folder <strong>Spam/Promosi</strong> di email Anda</li>
+            <li>Jika tidak menerima OTP, kontak administrator</li>
+        </ul>
+    </div>
+    
     <p><a href="/login">Sudah punya akun? Masuk</a></p>
     <a href="/"><button class="btn-secondary">🏠 Kembali ke Dashboard</button></a>
     """
@@ -1361,6 +1409,38 @@ def logout():
     session.clear()
     logger.info("✅ User logged out")
     return redirect('/')
+
+@app.route("/test_email")
+def test_email():
+    """Route untuk testing email di server"""
+    try:
+        test_recipient = "your_test_email@gmail.com"  # Ganti dengan email Anda
+        
+        # Test credentials
+        credentials_ok = bool(EMAIL_SENDER and EMAIL_PASSWORD)
+        
+        test_result = {
+            "email_sender": EMAIL_SENDER,
+            "email_password_set": bool(EMAIL_PASSWORD),
+            "credentials_ok": credentials_ok,
+            "test_recipient": test_recipient
+        }
+        
+        if credentials_ok:
+            # Test send email
+            success = send_email(
+                test_recipient, 
+                "🌿 Test Email dari Lelestari", 
+                "Ini adalah email test dari server deployment!"
+            )
+            test_result["email_sent"] = success
+        else:
+            test_result["email_sent"] = False
+            
+        return jsonify(test_result)
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # ============================================================
 # 🔹 12. ROUTES - DASHBOARD 
