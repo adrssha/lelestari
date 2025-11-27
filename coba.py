@@ -6,7 +6,7 @@ from email.message import EmailMessage
 from supabase import create_client, Client
 import os
 from dotenv import load_dotenv
-load_dotenv
+load_dotenv()
 import logging
 from datetime import datetime, date
 import json
@@ -9825,4 +9825,5 @@ if __name__ == "__main__":
     print("📒 Jurnal Penutup: http://localhost:5000/jurnal_penutup (Admin/Super Admin)")
     print("📊 Neraca Saldo Setelah Penutup: http://localhost:5000/neraca_saldo_setelah_penutup (Admin/Super Admin)")
     print("🔍 Test DB: http://localhost:5000/test_db")
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
