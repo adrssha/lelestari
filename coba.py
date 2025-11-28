@@ -6,7 +6,6 @@ from email.message import EmailMessage
 from supabase import create_client, Client
 import os
 from dotenv import load_dotenv
-load_dotenv()
 import logging
 from datetime import datetime, date
 import json
