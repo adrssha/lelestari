@@ -1,8 +1,6 @@
 from flask import Flask, render_template_string, request, redirect, url_for, session, jsonify, send_file
 from functools import wraps
 import random
-import smtplib
-from email.message import EmailMessage
 from supabase import create_client, Client
 import os
 from dotenv import load_dotenv
@@ -12,6 +10,8 @@ import json
 import base64
 from io import BytesIO
 import traceback
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
 
 # ============================================================
 # 🔧 1. KONFIGURASI AWAL
@@ -36,45 +36,42 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 # ============================================================
 # 🛠️ 2. FUNGSI BANTU (HELPER FUNCTIONS)
 # ============================================================
+# DI KODE ANDA - FUNGSI send_email YANG BARU:
 def send_email(recipient, subject, body):
-    """Fungsi untuk mengirim email - VERSI DIPERBAIKI"""
+    """Fungsi untuk mengirim email menggunakan SendGrid"""
     try:
         logger.info(f"🔄 Attempting to send email to: {recipient}")
-        logger.info(f"📧 Using sender: {EMAIL_SENDER}")
         
-        # Validasi credentials
-        if not EMAIL_SENDER or not EMAIL_PASSWORD:
-            logger.error("❌ Email credentials missing!")
+        # ✅ GUNAKAN EMAIL_PASSWORD SEBAGAI SENDGRID API KEY
+        SENDGRID_API_KEY = os.environ.get("EMAIL_PASSWORD")
+        if not EMAIL_SENDER or not SENDGRID_API_KEY:
+            logger.error("❌ SendGrid credentials missing!")
             return False
         
-        msg = EmailMessage()
-        msg["From"] = EMAIL_SENDER
-        msg["To"] = recipient
-        msg["Subject"] = subject
-        msg.set_content(body)
-
-        logger.info(f"📨 Connecting to SMTP server...")
+        from sendgrid import SendGridAPIClient
+        from sendgrid.helpers.mail import Mail
         
-        with smtplib.SMTP("smtp.gmail.com", 587) as server:
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-            
-            logger.info(f"🔐 Attempting login...")
-            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-            logger.info(f"✅ Login successful!")
-            
-            server.send_message(msg)
+        message = Mail(
+            from_email=EMAIL_SENDER,
+            to_emails=recipient,
+            subject=subject,
+            plain_text_content=body
+        )
+        
+        sg = SendGridAPIClient(SENDGRID_API_KEY)
+        response = sg.send(message)
+        
+        if response.status_code in [200, 202]:
             logger.info(f"✅ Email sent successfully to {recipient}")
             return True
+        else:
+            logger.error(f"❌ SendGrid Error: {response.status_code}")
+            return False
             
-    except smtplib.SMTPAuthenticationError as e:
-        logger.error(f"❌ SMTP Authentication Error: {e}")
-        logger.error("💡 Check your EMAIL_PASSWORD - it should be an APP PASSWORD, not your regular password")
+    except Exception as e:
+        logger.error(f"❌ General email error: {e}")
         return False
-    except smtplib.SMTPException as e:
-        logger.error(f"❌ SMTP Error: {e}")
-        return False
+            
     except Exception as e:
         logger.error(f"❌ General email error: {e}")
         logger.error(traceback.format_exc())
