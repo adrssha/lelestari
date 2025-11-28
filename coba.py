@@ -22,11 +22,12 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 # Load Environment Variables
-load_dotenv()
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-EMAIL_SENDER = os.getenv("EMAIL_SENDER")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+if os.environ.get("RAILWAY_ENVIRONMENT") is None:  # atau check env lain
+    load_dotenv()
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+EMAIL_SENDER = os.environ.get("EMAIL_SENDER")
+EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
 
 # Inisialisasi Flask & Supabase
 app = Flask(__name__)
@@ -9533,6 +9534,18 @@ def neraca_saldo_setelah_penutup():
 # ============================================================
 # 🔹 23. ROUTES - DEBUG & TESTING
 # ============================================================
+
+@app.route("/debug_env")
+def debug_env():
+    """Debug environment variables in deployment"""
+    env_vars = {
+        "SUPABASE_URL": os.environ.get("SUPABASE_URL"),
+        "SUPABASE_KEY": os.environ.get("SUPABASE_KEY"),
+        "EMAIL_SENDER": os.environ.get("EMAIL_SENDER"),
+        "EMAIL_PASSWORD": "***" if os.environ.get("EMAIL_PASSWORD") else None,
+        "ALL_ENV_KEYS": list(os.environ.keys())
+    }
+    return jsonify(env_vars)
 
 @app.route("/debug_ledger")
 @admin_required
