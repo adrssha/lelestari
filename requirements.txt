@@ -2,4 +2,4 @@ flask
 gunicorn
 python-dotenv
 supabase
-sendgrid==6.9.7
+sendgrid
