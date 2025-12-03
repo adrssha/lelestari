@@ -943,6 +943,10 @@ def dashboard():
                 <div class="action-icon">📊</div>
                 <div class="action-title">Chart of Account</div>
             </a>
+            <a href="/neraca_saldo_awal" class="action-card">
+                <div class="action-icon">💰</div>
+                <div class="action-title">Neraca Saldo Awal</div>
+            </a>
             <a href="/input_transaksi" class="action-card">
                 <div class="action-icon">📝</div>
                 <div class="action-title">Input Transaksi</div>
@@ -954,6 +958,10 @@ def dashboard():
             <a href="/buku_besar" class="action-card">
                 <div class="action-icon">📒</div>
                 <div class="action-title">Buku Besar</div>   
+            </a>
+            <a href="/nssp" class="action-card">
+                <div class="action-icon">🗂️</div>
+                <div class="action-title">Neraca Saldo Sebelum Penyesuaian</div>   
             </a>
             <a href="/jurnal_penyesuaian" class="action-card">
                 <div class="action-icon">📝</div>
@@ -983,6 +991,16 @@ def dashboard():
                 <div class="action-icon">💸</div>
                 <div class="action-title">Laporan Arus Kas</div>
             </a>
+            <a href="/jurnal_penutup" class="action-card">
+                <div class="action-icon">📒</div>
+                <div class="action-title">Jurnal Penutup</div>
+            </a>
+            <a href="/neraca_saldo_setelah_penutup" class="action-card">
+                <div class="action-icon">📊</div>
+                <div class="action-title">Neraca Saldo setelah Penutup</div>
+            </a>
+
+
 
             """ if user_role in ['admin', 'super_admin'] else ""])}
             
@@ -1527,7 +1545,7 @@ dashboard_html = """
             </a>
             <a href="/nssp" class="nav-item">
                 <span class="nav-icon">🗂️</span>
-                <span>NSSP</span>    
+                <span>Neraca Saldo Sebelum Penyesuaian</span>    
             </a>
             <a href="/jurnal_penyesuaian" class="nav-item">
                 <span class="nav-icon">📝</span>
@@ -1537,7 +1555,27 @@ dashboard_html = """
                 <span class="nav-icon">🗃️</span>
                 <span>Neraca Saldo setelah Penyesuaian</span>    
             </a>
-            -<a href="/jurnal_penutup" class="nav-item">
+            <a href="/neraca_lajur" class="nav-item">
+                <span class="nav-icon">📋</span>
+                <span>Neraca Lajur</span>    
+            </a>
+            <a href="/laporan_laba_rugi" class="nav-item">
+                <span class="nav-icon">📈</span>
+                <span>Laporan Laba Rugi</span>    
+            </a>
+            <a href="/laporan_perubahan_modal" class="nav-item">
+                <span class="nav-icon">📊</span>
+                <span>Laporan Perubahan Modal</span>    
+            </a>
+            <a href="/laporan_posisi_keuangan" class="nav-item">
+                <span class="nav-icon">💰</span>
+                <span>Laporan Posisi Keuangan</span>    
+            </a>
+            <a href="/laporan_arus_kas" class="nav-item">
+                <span class="nav-icon">💸</span>
+                <span>Laporan Arus Kas</span>    
+            </a>
+            <a href="/jurnal_penutup" class="nav-item">
                 <span class="nav-icon">📒</span>
                 <span>Jurnal Penutup</span>
             </a>
