@@ -12,6 +12,8 @@ from io import BytesIO
 import traceback
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
+import time
+from functools import lru_cache
 
 # ============================================================
 # 🔧 1. KONFIGURASI AWAL
@@ -156,6 +158,57 @@ def super_admin_required(f):
             ''', 403
         return f(*args, **kwargs)
     return decorated_function
+
+# ============================================================
+# 🔥 CACHE UNTUK PERCEPATAN - TAMBAHKAN INI!
+# ============================================================
+
+# Cache untuk data yang sering dipakai
+app.data_cache = {
+    'chart_of_accounts': None,
+    'chart_of_accounts_time': 0,
+    'opening_balances': None, 
+    'opening_balances_time': 0
+}
+
+def get_chart_of_accounts_fast():
+    """Ambil Chart of Accounts dengan CACHE - 5 MENIT"""
+    # Cek cache masih fresh (5 menit = 300 detik)
+    if (app.data_cache['chart_of_accounts'] and 
+        (time.time() - app.data_cache['chart_of_accounts_time']) < 300):
+        return app.data_cache['chart_of_accounts']
+    
+    # Jika cache expired, ambil dari database
+    try:
+        result = supabase.table("chart_of_accounts").select("*").order("account_code").execute()
+        accounts = result.data if result.data else []
+        
+        # Simpan ke cache
+        app.data_cache['chart_of_accounts'] = accounts
+        app.data_cache['chart_of_accounts_time'] = time.time()
+        
+        return accounts
+    except Exception as e:
+        print(f"❌ Error get accounts: {e}")
+        return []
+
+def get_opening_balances_fast():
+    """Ambil Opening Balances dengan CACHE - 5 MENIT"""
+    if (app.data_cache['opening_balances'] and
+        (time.time() - app.data_cache['opening_balances_time']) < 300):
+        return app.data_cache['opening_balances']
+    
+    try:
+        result = supabase.table("opening_balances").select("*").execute()
+        balances = result.data if result.data else []
+        
+        app.data_cache['opening_balances'] = balances
+        app.data_cache['opening_balances_time'] = time.time()
+        
+        return balances
+    except Exception as e:
+        print(f"❌ Error get balances: {e}")
+        return []
 
 # ============================================================
 # 🏠 3. HALAMAN SEBELUM LOGIN
@@ -1693,6 +1746,7 @@ dashboard_html = """
 </html>
 """
 
+
 # ============================================================
 # 📊 6. CHART OF ACCOUNT
 # ============================================================
@@ -1707,7 +1761,7 @@ def chart_of_account():
     user_role = get_user_role()
     
     # Ambil data Chart of Account dari database
-    accounts = get_chart_of_accounts()
+    accounts = get_chart_of_accounts_fast()  # ⚡ YANG CEPAT!
     
     # Kelompokkan akun berdasarkan kategori
     accounts_by_category = {}
@@ -2080,12 +2134,30 @@ def get_account_name(account_code):
         return account_code
 
 def get_chart_of_accounts():
-    """Ambil data Chart of Account dari database"""
+    """AMBIL DATA DENGAN CACHE - TINGGAL TAMBAH CACHE!"""
+    
+    # 🔥 TAMBAHKAN CEK CACHE DI SINI!
+    if hasattr(app, 'data_cache'):
+        if (app.data_cache.get('chart_of_accounts') and 
+            (time.time() - app.data_cache.get('chart_of_accounts_time', 0)) < 300):
+            print("✅ PAKAI CACHE: Chart of Accounts")
+            return app.data_cache['chart_of_accounts']
+    
+    # Jika tidak ada cache, ambil dari database
+    print("🔄 AMBIL DATABASE: Chart of Accounts")
     try:
         result = supabase.table("chart_of_accounts").select("*").order("account_code").execute()
-        return result.data if result.data else []
+        accounts = result.data if result.data else []
+        
+        # 🔥 SIMPAN KE CACHE
+        if not hasattr(app, 'data_cache'):
+            app.data_cache = {}
+        app.data_cache['chart_of_accounts'] = accounts
+        app.data_cache['chart_of_accounts_time'] = time.time()
+        
+        return accounts
     except Exception as e:
-        logger.error(f"❌ Error getting chart of accounts: {e}")
+        print(f"❌ Error getting chart of accounts: {e}")
         return []
     
 def get_account_by_code(account_code):
@@ -2195,7 +2267,7 @@ def neraca_saldo_awal():
     total_summary = calculate_total_opening_balances()
     
     # Ambil data Chart of Account untuk dropdown
-    accounts = get_chart_of_accounts()
+    accounts = get_chart_of_accounts_fast()  # ⚡ YANG CEPAT!
     account_options = ""
     for account in accounts:
         account_options += f'<option value="{account["account_code"]}">{account["account_code"]} - {account["account_name"]}</option>'
@@ -2513,12 +2585,30 @@ def neraca_saldo_awal():
 # ============================================================
 
 def get_opening_balances():
-    """Ambil data neraca saldo awal"""
+    """AMBIL DATA DENGAN CACHE - TINGGAL TAMBAH CACHE DI DALAM FUNGSI INI!"""
+    
+    # 🔥 TAMBAHKAN CEK CACHE DI SINI SAJA!
+    if hasattr(app, 'data_cache'):
+        if (app.data_cache.get('opening_balances') and 
+            (time.time() - app.data_cache.get('opening_balances_time', 0)) < 300):
+            print("✅ PAKAI CACHE: Opening Balances")
+            return app.data_cache['opening_balances']
+    
+    # Jika tidak ada cache, ambil dari database
+    print("🔄 AMBIL DATABASE: Opening Balances")
     try:
-        result = supabase.table("opening_balances").select("*, chart_of_accounts(account_name, account_type)").order("created_at").execute()
-        return result.data if result.data else []
+        result = supabase.table("opening_balances").select("*").order("created_at").execute()
+        balances = result.data if result.data else []
+        
+        # 🔥 SIMPAN KE CACHE
+        if not hasattr(app, 'data_cache'):
+            app.data_cache = {}
+        app.data_cache['opening_balances'] = balances
+        app.data_cache['opening_balances_time'] = time.time()
+        
+        return balances
     except Exception as e:
-        logger.error(f"❌ Error getting opening balances: {e}")
+        print(f"❌ Error get opening balances: {e}")
         return []
 
 def get_opening_balance_by_account(account_code):
@@ -2638,7 +2728,7 @@ def input_transaksi():
     user_role = get_user_role()
     
     # Ambil data Chart of Account untuk dropdown
-    accounts = get_chart_of_accounts()
+    accounts = get_chart_of_accounts_fast()  # ⚡ YANG CEPAT!
     
     # Generate options untuk dropdown akun
     account_options = ""
@@ -3009,10 +3099,10 @@ def get_general_ledger_entries_grouped_by_account(start_date=None, end_date=None
         if hasattr(app, 'accounts_cache_full'):
             cache_time, all_accounts = app.accounts_cache_full.get(accounts_cache_key, (None, None))
             if not all_accounts or not cache_time or (datetime.now() - cache_time).seconds > 300:
-                all_accounts = get_chart_of_accounts()
+                all_accounts = get_chart_of_accounts_fast()
                 app.accounts_cache_full = {accounts_cache_key: (datetime.now(), all_accounts)}
         else:
-            all_accounts = get_chart_of_accounts()
+            all_accounts = get_chart_of_accounts_fast()
             app.accounts_cache_full = {accounts_cache_key: (datetime.now(), all_accounts)}
         
         if not all_accounts:
@@ -3608,10 +3698,10 @@ def buku_besar():
             logger.info("✅ Using cached accounts list")
             all_accounts = cached_accounts
         else:
-            all_accounts = get_chart_of_accounts()
+            all_accounts = get_chart_of_accounts_fast()
             app.accounts_cache[cache_key_accounts] = (datetime.now(), all_accounts)
     else:
-        all_accounts = get_chart_of_accounts()
+        all_accounts = get_chart_of_accounts_fast()
         app.accounts_cache = {cache_key_accounts: (datetime.now(), all_accounts)}
     
     # Buat dropdown options
@@ -4590,7 +4680,7 @@ def calculate_trial_balance(period=None):
         if not ledger_data:
             logger.info(f"ℹ️ No ledger data found for period {period}")
             # Return semua akun dengan saldo 0
-            accounts = get_chart_of_accounts()
+            accounts = get_chart_of_accounts_fast()  # ⚡ YANG CEPAT!
             trial_balance_data = []
             for account in accounts:
                 trial_balance_data.append({
@@ -4737,7 +4827,7 @@ def jurnal_penyesuaian():
     logger.info(f"📊 Found {len(adjusting_journals)} adjusting journals with entries")
     
     # Ambil data Chart of Account untuk dropdown
-    accounts = get_chart_of_accounts()
+    accounts = get_chart_of_accounts_fast()  # ⚡ YANG CEPAT!
     account_options = ""
     for account in accounts:
         account_options += f'<option value="{account["account_code"]}">{account["account_code"]} - {account["account_name"]}</option>'
@@ -6298,7 +6388,7 @@ def correct_worksheet_allocation(account_type, account_name):
 def ensure_hpp_and_depreciation_accounts():
     """Pastikan akun HPP dan penyusutan ada di Chart of Accounts"""
     try:
-        accounts = get_chart_of_accounts()
+        accounts = get_chart_of_accounts_fast()  # ⚡ YANG CEPAT!
         
         # Cek akun HPP
         hpp_exists = any(acc['account_code'] == '5-1100' for acc in accounts)
