@@ -32,6 +32,10 @@ EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "lelestari-secret-123")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+app.ledger_cache = {}
+app.accounts_cache = {}
+app.accounts_cache_full = {}
+app.tb_cache = {}
 
 # ============================================================
 # 🛠️ 2. FUNGSI BANTU (HELPER FUNCTIONS)
@@ -999,8 +1003,6 @@ def dashboard():
                 <div class="action-icon">📊</div>
                 <div class="action-title">Neraca Saldo setelah Penutup</div>
             </a>
-
-
 
             """ if user_role in ['admin', 'super_admin'] else ""])}
             
@@ -2935,244 +2937,249 @@ def input_transaksi():
 # ============================================================
 
 def get_journal_entries_with_details(start_date=None, end_date=None, limit=None):
-    """Ambil data jurnal umum dengan detail entries - DIPERBAIKI FILTER TANGGAL"""
+    """Ambil data jurnal umum dengan detail entries - OPTIMIZED"""
     try:
-        logger.info(f"🔍 Fetching journal entries with details - Date: {start_date} to {end_date}")
+        logger.info(f"🔍 Fetching journal entries with details")
         
-        # Query untuk general_journals
-        query = supabase.table("general_journals").select("*")
+        # ✅ PERBAIKAN 1: Query dengan JOIN untuk menghindari N+1 query
+        query = supabase.table("general_journals").select("*, journal_entries(*)")
         
-        # ✅ PERBAIKAN: Filter tanggal yang lebih robust
         if start_date and end_date and start_date != "" and end_date != "":
-            # Pastikan format tanggal benar
-            try:
-                # Validasi format tanggal
-                datetime.strptime(start_date, '%Y-%m-%d')
-                datetime.strptime(end_date, '%Y-%m-%d')
-                
-                # Terapkan filter dengan logging
-                logger.info(f"✅ Applying date filter: {start_date} to {end_date}")
-                query = query.gte('transaction_date', start_date).lte('transaction_date', end_date)
-            except ValueError as e:
-                logger.error(f"❌ Invalid date format: {e}")
-                # Jangan terapkan filter jika format salah
-        else:
-            logger.info("ℹ️ No date filter applied")
-            
-        # Urutkan dari tanggal terkecil (terlama ke terbaru)
+            query = query.gte('transaction_date', start_date).lte('transaction_date', end_date)
+        
         query = query.order("transaction_date", desc=False)
         
         if limit:
             query = query.limit(limit)
             
-        journals_result = query.execute()
-        journals = journals_result.data if journals_result.data else []
+        result = query.execute()
+        journals = result.data if result.data else []
         
-        logger.info(f"📊 Found {len(journals)} journals after date filtering")
+        logger.info(f"📊 Found {len(journals)} journals")
         
-        # ✅ DEBUG: Log transaction dates untuk verifikasi
-        for journal in journals[:5]:  # Log 5 pertama saja
-            logger.info(f"📅 Journal {journal.get('transaction_number')} - Date: {journal.get('transaction_date')}")
-        
-        # Untuk setiap journal, ambil detail entries
-        journals_with_entries = []
-        
+        # ✅ PERBAIKAN 2: Kurangi processing yang tidak perlu
+        formatted_journals = []
         for journal in journals:
-            # Ambil journal entries untuk journal ini
-            entries_result = supabase.table("journal_entries")\
-                .select("*")\
-                .eq("journal_id", journal['id'])\
-                .execute()
+            journal_entries = journal.get('journal_entries', [])
             
-            journal_entries = entries_result.data if entries_result.data else []
-            
-            # Format data journal dengan entries
-            journal_data = {
+            # Format minimal yang diperlukan
+            formatted_journals.append({
                 'id': journal['id'],
                 'transaction_number': journal.get('transaction_number', ''),
                 'transaction_date': journal.get('transaction_date', ''),
                 'description': journal.get('description', 'Transaksi'),
                 'total_amount': journal.get('total_amount', 0),
                 'created_by': journal.get('created_by', 'System'),
-                'created_at': journal.get('created_at', ''),
                 'journal_entries': journal_entries
-            }
-            
-            journals_with_entries.append(journal_data)
+            })
         
-        logger.info(f"✅ Journal entries with details fetched: {len(journals_with_entries)} journals")
-        return journals_with_entries
+        return formatted_journals
         
     except Exception as e:
-        logger.error(f"❌ Error getting journal entries with details: {e}")
-        logger.error(traceback.format_exc())
+        logger.error(f"❌ Error getting journal entries: {e}")
         return []
 
 def get_general_ledger_entries_grouped_by_account(start_date=None, end_date=None):
-    """Ambil data buku besar yang dikelompokkan per akun dengan saldo running - DIPERBAIKI FILTER"""
+    """Ambil data buku besar yang dikelompokkan per akun dengan saldo running - OPTIMIZED VERSION"""
     try:
-        logger.info(f"🔍 Fetching grouped ledger data - Date: {start_date} to {end_date}")
+        logger.info(f"🔍 Fetching optimized ledger data - Date: {start_date} to {end_date}")
         
-        # Ambil semua akun dari Chart of Account
-        all_accounts = get_chart_of_accounts()
+        # ✅ PERBAIKAN 1: Cache sederhana untuk hasil yang sama (5 menit)
+        cache_key = f"ledger_{start_date}_{end_date}"
+        if hasattr(app, 'ledger_cache'):
+            cache_time, cached_data = app.ledger_cache.get(cache_key, (None, None))
+            if cached_data and cache_time and (datetime.now() - cache_time).seconds < 300:  # Cache 5 menit
+                logger.info(f"✅ Using cached ledger data (age: {(datetime.now() - cache_time).seconds}s)")
+                return cached_data
+        
+        # ✅ PERBAIKAN 2: Query lebih efisien - single query dengan join
+        # Query untuk journals dengan entries dalam satu call
+        query = supabase.table("general_journals").select("*, journal_entries(*)")
+        
+        if start_date and end_date and start_date != "" and end_date != "":
+            query = query.gte('transaction_date', start_date).lte('transaction_date', end_date)
+        
+        query = query.order("transaction_date", desc=False)
+        journals_result = query.execute()
+        journals = journals_result.data if journals_result.data else []
+        
+        # ✅ PERBAIKAN 3: Ambil semua data yang diperlukan sekaligus
+        # Ambil chart of accounts sekali saja
+        accounts_cache_key = "all_accounts_cache"
+        if hasattr(app, 'accounts_cache_full'):
+            cache_time, all_accounts = app.accounts_cache_full.get(accounts_cache_key, (None, None))
+            if not all_accounts or not cache_time or (datetime.now() - cache_time).seconds > 300:
+                all_accounts = get_chart_of_accounts()
+                app.accounts_cache_full = {accounts_cache_key: (datetime.now(), all_accounts)}
+        else:
+            all_accounts = get_chart_of_accounts()
+            app.accounts_cache_full = {accounts_cache_key: (datetime.now(), all_accounts)}
+        
         if not all_accounts:
             logger.error("❌ No accounts found in Chart of Accounts")
             return []
         
-        # Ambil neraca saldo awal
-        opening_balances = get_opening_balances_with_account_info()
-        logger.info(f"📊 Found {len(opening_balances)} opening balances")
+        # Ambil opening balances
+        opening_result = supabase.table("opening_balances").select("*").execute()
+        opening_balances = opening_result.data if opening_result.data else []
         
-        # ✅ PERBAIKAN: Gunakan fungsi yang sudah diperbaiki untuk ambil jurnal
-        journals = get_journal_entries_with_details(start_date, end_date)
-        logger.info(f"📊 Journals after date filtering: {len(journals)}")
+        logger.info(f"📊 Found {len(journals)} journals, {len(all_accounts)} accounts, {len(opening_balances)} opening balances")
         
-        # Kelompokkan data per akun
-        account_data = {}
+        # ✅ PERBAIKAN 4: Struktur data yang lebih efisien
+        account_map = {}
+        opening_map = {bal['account_code']: bal for bal in opening_balances}
         
+        # Inisialisasi semua akun
         for account in all_accounts:
             account_code = account['account_code']
-            account_name = account['account_name']
-            account_type = account['account_type']
-            
-            # Cari saldo awal untuk akun ini
-            opening_balance = next((bal for bal in opening_balances if bal['account_code'] == account_code), None)
-            
-            # PERBAIKAN: Inisialisasi initial_balance dengan benar berdasarkan tipe akun
-            initial_balance = 0
-            if opening_balance:
-                if account_type in ['Aktiva Lancar', 'Aktiva Tetap', 'Beban']:
-                    # Akun debit normal: saldo awal debit positif, kredit negatif
-                    if opening_balance['position'] == 'debit':
-                        initial_balance = opening_balance['amount']
-                    else:
-                        initial_balance = -opening_balance['amount']
-                else:
-                    # Akun kredit normal (Kewajiban, Modal, Pendapatan): saldo awal kredit positif, debit negatif
-                    if opening_balance['position'] == 'kredit':
-                        initial_balance = opening_balance['amount']
-                    else:
-                        initial_balance = -opening_balance['amount']
-            
-            account_data[account_code] = {
+            account_map[account_code] = {
                 'account_code': account_code,
-                'account_name': account_name,
-                'account_type': account_type,
+                'account_name': account['account_name'],
+                'account_type': account['account_type'],
                 'entries': [],
                 'total_debit': 0,
                 'total_credit': 0,
-                'final_balance': initial_balance,
-                'initial_balance': initial_balance,
-                'has_opening_balance': opening_balance is not None,
-                'opening_balance_amount': opening_balance['amount'] if opening_balance else 0,
-                'opening_balance_position': opening_balance['position'] if opening_balance else None
+                'initial_balance': 0,
+                'final_balance': 0,
+                'has_opening_balance': False
             }
             
-            # Tambahkan entry saldo awal jika ada
-            if opening_balance:
-                account_data[account_code]['entries'].append({
-                    'date': 'SALDO AWAL',
-                    'description': 'NERACA SALDO AWAL',
-                    'debit': opening_balance['amount'] if opening_balance['position'] == 'debit' else 0,
-                    'credit': opening_balance['amount'] if opening_balance['position'] == 'kredit' else 0,
-                    'is_opening_balance': True,
-                    'sort_order': 0,
-                    'running_balance': initial_balance
-                })
+            # Tambahkan opening balance jika ada
+            if account_code in opening_map:
+                opening = opening_map[account_code]
+                amount = opening['amount']
+                position = opening['position']
+                
+                # Set initial balance berdasarkan tipe akun
+                if account['account_type'] in ['Aktiva Lancar', 'Aktiva Tetap', 'Beban']:
+                    account_map[account_code]['initial_balance'] = amount if position == 'debit' else -amount
+                else:
+                    account_map[account_code]['initial_balance'] = amount if position == 'kredit' else -amount
+                
+                account_map[account_code]['has_opening_balance'] = True
+                
+                # Tambahkan entry untuk opening balance
+                if amount > 0:
+                    account_map[account_code]['entries'].append({
+                        'date': 'SALDO AWAL',
+                        'description': 'NERACA SALDO AWAL',
+                        'debit': amount if position == 'debit' else 0,
+                        'credit': amount if position == 'kredit' else 0,
+                        'is_opening_balance': True,
+                        'sort_order': 0
+                    })
         
-        # Proses setiap transaksi jurnal
+        # ✅ PERBAIKAN 5: Proses semua journals dalam satu pass
         for journal in journals:
+            journal_entries = journal.get('journal_entries', [])
+            if not journal_entries:
+                continue
+                
             transaction_date = journal.get('transaction_date', '')
             description = journal.get('description', 'Transaksi')
             
-            for entry in journal.get('journal_entries', []):
-                account_code = entry['account_code']
+            for entry in journal_entries:
+                account_code = entry.get('account_code')
+                if not account_code:
+                    continue
                 
-                if account_code not in account_data:
-                    # Jika akun tidak ada di Chart of Account, buat entry baru
-                    account_data[account_code] = {
+                # Jika akun tidak ada di map, tambahkan
+                if account_code not in account_map:
+                    account_map[account_code] = {
                         'account_code': account_code,
                         'account_name': get_account_name(account_code),
                         'account_type': 'Unknown',
                         'entries': [],
                         'total_debit': 0,
                         'total_credit': 0,
-                        'final_balance': 0,
                         'initial_balance': 0,
-                        'has_opening_balance': False,
-                        'opening_balance_amount': 0,
-                        'opening_balance_position': None
+                        'final_balance': 0,
+                        'has_opening_balance': False
                     }
                 
-                debit = entry['amount'] if entry['position'] == 'debit' else 0
-                credit = entry['amount'] if entry['position'] == 'kredit' else 0
+                amount = entry.get('amount', 0)
+                if amount <= 0:
+                    continue
+                    
+                position = entry.get('position', 'debit')
                 
-                # Tambahkan entry dengan sort_order untuk transaksi biasa
-                account_data[account_code]['entries'].append({
+                # Update totals
+                if position == 'debit':
+                    account_map[account_code]['total_debit'] += amount
+                    debit = amount
+                    credit = 0
+                else:
+                    account_map[account_code]['total_credit'] += amount
+                    debit = 0
+                    credit = amount
+                
+                # Tambahkan entry
+                account_map[account_code]['entries'].append({
                     'date': transaction_date,
                     'description': description,
                     'debit': debit,
                     'credit': credit,
                     'is_opening_balance': False,
-                    'sort_order': 1
+                    'sort_order': 1,
+                    'journal_id': journal.get('id'),
+                    'entry_id': entry.get('id')
                 })
-                
-                # Update total
-                account_data[account_code]['total_debit'] += debit
-                account_data[account_code]['total_credit'] += credit
         
-        # Hitung saldo akhir dan saldo running untuk setiap akun - PERBAIKAN TOTAL
-        for account_code, data in account_data.items():
-            # Tentukan tipe akun untuk menghitung saldo yang benar
-            account_type = data['account_type']
+        # ✅ PERBAIKAN 6: Hitung final balance dan running balance
+        result = []
+        for account_code, data in account_map.items():
+            # Skip akun tanpa aktivitas sama sekali
+            if not data['entries'] and not data['has_opening_balance']:
+                continue
             
-            # PERBAIKAN: Gunakan initial_balance yang sudah disimpan
-            initial_balance = data['initial_balance']
-
-            # Hitung saldo akhir berdasarkan tipe akun - LOGIKA YANG LEBIH TEPAT
-            if account_type in ['Aktiva Lancar', 'Aktiva Tetap', 'Beban']:
-                # Akun debit normal: Saldo = Saldo Awal + Total Debit - Total Credit
-                data['final_balance'] = initial_balance + data['total_debit'] - data['total_credit']
-            else:  # Kewajiban, Modal, Pendapatan
-                # Akun kredit normal: Saldo = Saldo Awal + Total Credit - Total Debit
-                data['final_balance'] = initial_balance + data['total_credit'] - data['total_debit']
-                        
-            # URUTKAN ENTRIES: Saldo awal dulu (sort_order=0), lalu transaksi (sort_order=1)
+            # Hitung final balance
+            if data['account_type'] in ['Aktiva Lancar', 'Aktiva Tetap', 'Beban']:
+                data['final_balance'] = data['initial_balance'] + data['total_debit'] - data['total_credit']
+            else:
+                data['final_balance'] = data['initial_balance'] + data['total_credit'] - data['total_debit']
+            
+            # Urutkan entries
             data['entries'].sort(key=lambda x: (x.get('sort_order', 1), x['date']))
             
-            # Hitung saldo running untuk setiap entry - PERBAIKAN PERHITUNGAN RUNNING BALANCE
-            running_balance = initial_balance  # Mulai dari saldo awal
-            
-            for i, entry in enumerate(data['entries']):
+            # Hitung running balance
+            running_balance = data['initial_balance']
+            for entry in data['entries']:
                 if entry.get('is_opening_balance'):
-                    # Untuk saldo awal, langsung set running balance (seharusnya sudah benar)
                     entry['running_balance'] = running_balance
                 else:
-                    # Untuk transaksi biasa, update running balance berdasarkan tipe akun
-                    if account_type in ['Aktiva Lancar', 'Aktiva Tetap', 'Beban']:
-                        # Akun debit: Debit menambah saldo, Kredit mengurangi saldo
+                    if data['account_type'] in ['Aktiva Lancar', 'Aktiva Tetap', 'Beban']:
                         running_balance += entry['debit'] - entry['credit']
                     else:
-                        # Akun kredit: Kredit menambah saldo, Debit mengurangi saldo
                         running_balance += entry['credit'] - entry['debit']
-                    
-                    # Simpan saldo running
                     entry['running_balance'] = running_balance
+            
+            result.append(data)
         
-        # Konversi ke list dan filter hanya akun yang memiliki transaksi atau saldo awal
-        result = []
-        for account_code, data in account_data.items():
-            if data['entries']:  # Hanya tampilkan akun yang memiliki saldo awal atau transaksi
-                result.append(data)
-        
-        # Urutkan berdasarkan kode akun
+        # Urutkan hasil berdasarkan kode akun
         result.sort(key=lambda x: x['account_code'])
         
-        logger.info(f"✅ Grouped ledger data: {len(result)} accounts with transactions/opening balances")
+        logger.info(f"✅ Optimized ledger data prepared: {len(result)} active accounts")
+        
+        # ✅ PERBAIKAN 7: Simpan ke cache
+        if not hasattr(app, 'ledger_cache'):
+            app.ledger_cache = {}
+        app.ledger_cache[cache_key] = (datetime.now(), result)
+        
+        # ✅ PERBAIKAN 8: Clean old cache entries (optional)
+        # Hapus cache yang lebih dari 10 menit
+        current_time = datetime.now()
+        expired_keys = []
+        for key, (cache_time, _) in app.ledger_cache.items():
+            if (current_time - cache_time).seconds > 600:  # 10 menit
+                expired_keys.append(key)
+        
+        for key in expired_keys:
+            del app.ledger_cache[key]
+        
         return result
         
     except Exception as e:
-        logger.error(f"❌ Error getting grouped ledger entries: {e}")
+        logger.error(f"❌ Error in optimized ledger function: {e}")
         logger.error(traceback.format_exc())
         return []
 
@@ -3261,7 +3268,7 @@ def jurnal_umum():
         logger.info("ℹ️ Empty dates detected, showing all data")
     
     # Ambil data jurnal umum - URUTKAN DARI TANGGAL TERKECIL
-    journals = get_journal_entries_with_details(start_date, end_date, limit=100)
+    journals = get_journal_entries_with_details(start_date, end_date, limit=65)
     
     # ✅ DEBUG: Tampilkan info filter di UI
     filter_info = ""
@@ -3555,13 +3562,13 @@ def jurnal_umum():
 @app.route("/buku_besar")
 @admin_required
 def buku_besar():
-    """Halaman buku besar untuk melihat semua akun dalam tabel terpisah per akun"""
+    """Halaman buku besar untuk melihat semua akun dalam tabel terpisah per akun - OPTIMIZED"""
     user_email = session.get('user_email')
     user_name = session.get('user_name', 'Admin')
     user_id = session.get('user_id', 'Unknown')
     user_role = get_user_role()
     
-    # Buat data contoh jika belum ada
+    # ✅ PERBAIKAN 1: Hanya buat data contoh jika benar-benar kosong (dipindahkan ke fungsi)
     create_sample_ledger_data()
     
     # Ambil parameter dari URL
@@ -3571,27 +3578,67 @@ def buku_besar():
     
     logger.info(f"📒 Buku Besar Grouped - Filter: start={start_date}, end={end_date}, account={account_filter}")
     
-    # Ambil data buku besar yang sudah dikelompokkan
+    # ✅ PERBAIKAN 2: Ambil data dengan fungsi yang sudah dioptimasi
     grouped_ledger_data = get_general_ledger_entries_grouped_by_account(start_date, end_date)
     
-    # Filter berdasarkan akun tertentu jika dipilih
+    # ✅ PERBAIKAN 3: Filter di memory, bukan di query
     if account_filter and account_filter != '-- Semua Akun --':
         grouped_ledger_data = [account for account in grouped_ledger_data if account['account_code'] == account_filter]
     
-    # Ambil daftar akun untuk dropdown filter
-    all_accounts = get_chart_of_accounts()
+    # ✅ PERBAIKAN 4: Implementasi pagination untuk mengurangi data yang ditampilkan
+    PAGE_SIZE = 15  # Max 15 akun per halaman (dikurangi dari sebelumnya)
+    page = int(request.args.get('page', 1))
+    
+    total_accounts = len(grouped_ledger_data)
+    total_pages = (total_accounts + PAGE_SIZE - 1) // PAGE_SIZE if total_accounts > 0 else 1
+    
+    # Batasi halaman agar valid
+    page = max(1, min(page, total_pages))
+    
+    start_idx = (page - 1) * PAGE_SIZE
+    end_idx = min(start_idx + PAGE_SIZE, total_accounts)
+    
+    paged_data = grouped_ledger_data[start_idx:end_idx]
+    
+    # ✅ PERBAIKAN 5: Cache untuk daftar akun (cache 5 menit)
+    cache_key_accounts = "all_accounts_list"
+    if hasattr(app, 'accounts_cache'):
+        cache_time, cached_accounts = app.accounts_cache.get(cache_key_accounts, (None, None))
+        if cached_accounts and cache_time and (datetime.now() - cache_time).seconds < 300:  # 5 menit
+            logger.info("✅ Using cached accounts list")
+            all_accounts = cached_accounts
+        else:
+            all_accounts = get_chart_of_accounts()
+            app.accounts_cache[cache_key_accounts] = (datetime.now(), all_accounts)
+    else:
+        all_accounts = get_chart_of_accounts()
+        app.accounts_cache = {cache_key_accounts: (datetime.now(), all_accounts)}
+    
+    # Buat dropdown options
     account_options = '<option value="-- Semua Akun --">-- Semua Akun --</option>'
     for account in all_accounts:
         selected = 'selected' if account_filter == account['account_code'] else ''
         account_options += f'<option value="{account["account_code"]}" {selected}>{account["account_code"]} - {account["account_name"]}</option>'
     
+    # ✅ PERBAIKAN 6: Batasi jumlah entries per akun yang ditampilkan
+    MAX_ENTRIES_PER_ACCOUNT = 50  # Max 50 entries per akun
+    
     # Buat HTML untuk setiap akun
     ledger_html = ""
     
-    if grouped_ledger_data:
-        for account_data in grouped_ledger_data:
+    if paged_data:
+        for account_data in paged_data:
             account_code = account_data['account_code']
             account_name = account_data['account_name']
+            
+            # ✅ PERBAIKAN 7: Potong entries jika terlalu banyak
+            entries_to_display = account_data['entries']
+            if len(entries_to_display) > MAX_ENTRIES_PER_ACCOUNT:
+                # Tampilkan entries terbaru saja
+                entries_to_display = entries_to_display[-MAX_ENTRIES_PER_ACCOUNT:]
+                entry_warning = f"<div style='background: #fff3cd; padding: 5px; text-align: center; font-size: 12px; color: #856404;'>⚠️ Menampilkan {MAX_ENTRIES_PER_ACCOUNT} entries terbaru dari total {len(account_data['entries'])} entries</div>"
+            else:
+                entry_warning = ""
             
             account_table_html = f"""
             <div class="account-section" style="margin-bottom: 30px; border: 1px solid #ddd; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
@@ -3600,7 +3647,7 @@ def buku_besar():
                         <div>
                             <h4 style="margin: 0; font-size: 16px; font-weight: bold;">{account_code} - {account_name}</h4>
                             <div style="font-size: 12px; opacity: 0.9; margin-top: 5px;">
-                                Total Entries: {len(account_data['entries'])}
+                                Total Entries: {len(account_data['entries'])} | Ditampilkan: {len(entries_to_display)}
                             </div>
                         </div>
                         <div style="text-align: right;">
@@ -3612,6 +3659,8 @@ def buku_besar():
                         </div>
                     </div>
                 </div>
+                
+                {entry_warning}
                 
                 <div style="max-height: 400px; overflow-y: auto;">
                     <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
@@ -3628,7 +3677,7 @@ def buku_besar():
             """
 
             # Tambahkan baris untuk setiap entry
-            for entry in account_data['entries']:
+            for entry in entries_to_display:
                 # Format saldo untuk display
                 display_balance = entry['running_balance']
                 balance_color = "#28a745" if display_balance >= 0 else "#dc3545"
@@ -3686,16 +3735,52 @@ def buku_besar():
         </div>
         """
     
-    # Hitung total keseluruhan
-    total_all_debit = sum(account['total_debit'] for account in grouped_ledger_data)
-    total_all_credit = sum(account['total_credit'] for account in grouped_ledger_data)
+    # Hitung total keseluruhan DARI DATA YANG DITAMPILKAN SAJA (paged_data)
+    total_all_debit = sum(account['total_debit'] for account in paged_data)
+    total_all_credit = sum(account['total_credit'] for account in paged_data)
+    
+    # ✅ PERBAIKAN 8: Buat pagination controls
+    pagination_html = ""
+    if total_pages > 1:
+        pagination_html = '<div style="margin: 20px 0; text-align: center;">'
+        
+        # Previous button
+        if page > 1:
+            prev_params = f"?page={page-1}"
+            if start_date: prev_params += f"&start_date={start_date}"
+            if end_date: prev_params += f"&end_date={end_date}"
+            if account_filter: prev_params += f"&account={account_filter}"
+            pagination_html += f'<a href="{prev_params}" style="margin: 0 5px; padding: 8px 12px; background: #6c757d; color: white; border-radius: 4px; text-decoration: none;">← Sebelumnya</a>'
+        
+        # Page numbers
+        for p in range(1, total_pages + 1):
+            if p == page:
+                pagination_html += f'<span style="margin: 0 5px; padding: 8px 12px; background: #008DD8; color: white; border-radius: 4px;">{p}</span>'
+            else:
+                page_params = f"?page={p}"
+                if start_date: page_params += f"&start_date={start_date}"
+                if end_date: page_params += f"&end_date={end_date}"
+                if account_filter: page_params += f"&account={account_filter}"
+                pagination_html += f'<a href="{page_params}" style="margin: 0 5px; padding: 8px 12px; background: #e9ecef; color: #333; border-radius: 4px; text-decoration: none;">{p}</a>'
+        
+        # Next button
+        if page < total_pages:
+            next_params = f"?page={page+1}"
+            if start_date: next_params += f"&start_date={start_date}"
+            if end_date: next_params += f"&end_date={end_date}"
+            if account_filter: next_params += f"&account={account_filter}"
+            pagination_html += f'<a href="{next_params}" style="margin: 0 5px; padding: 8px 12px; background: #6c757d; color: white; border-radius: 4px; text-decoration: none;">Selanjutnya →</a>'
+        
+        pagination_html += f'<div style="margin-top: 10px; font-size: 14px; color: #666;">Halaman {page} dari {total_pages} | Total {total_accounts} akun</div>'
+        pagination_html += '</div>'
     
     summary_html = f"""
     <div style="background: #e9ecef; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
         <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 15px; text-align: center;">
             <div>
                 <strong>Total Akun:</strong> 
-                <span style="color: #008DD8; font-weight: bold; font-size: 16px;">{len(grouped_ledger_data)}</span>
+                <span style="color: #008DD8; font-weight: bold; font-size: 16px;">{total_accounts}</span>
+                <div style="font-size: 12px; color: #666;">Ditampilkan: {len(paged_data)}</div>
             </div>
             <div>
                 <strong>Total Debit:</strong> 
@@ -3714,15 +3799,16 @@ def buku_besar():
             {f'<span style="color: #dc3545; margin-left: 10px;">(Selisih: {format_currency(abs(total_all_debit - total_all_credit))})</span>' if total_all_debit != total_all_credit else ''}
         </div>
     </div>
-    """ if grouped_ledger_data else ""
+    """ if paged_data else ""
 
     content = f"""
     <div class="welcome-section">
-        <h2>📒 Buku Besar (General Ledger)</h2>
+        <h2>📒 Buku Besar (General Ledger) - OPTIMIZED</h2>
         <div class="welcome-message">
             Lihat semua pergerakan transaksi untuk setiap akun dalam satu tampilan lengkap. 
             Setiap akun ditampilkan dalam tabel terpisah dengan saldo running.
             <br><strong>💡 Neraca Saldo Awal selalu ditampilkan di baris pertama setiap akun.</strong>
+            <br><strong>🚀 OPTIMASI: Pagination + Cache + Limit Entries</strong>
         </div>
     </div>
 
@@ -3756,16 +3842,19 @@ def buku_besar():
                 {'<a href="/buku_besar" style="display: block; margin-top: 5px; text-align: center; font-size: 12px;">Hapus Filter</a>' if start_date or end_date or account_filter else ''}
             </div>
         </form>
+        
+        <!-- Pagination Controls (Top) -->
+        {pagination_html if pagination_html else ''}
     </div>
 
     {summary_html}
 
     <div class="quick-actions">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 15px;">
             <h3 style="margin: 0;">Buku Besar - Dikelompokkan per Akun</h3>
             <div style="display: flex; gap: 10px; align-items: center;">
                 <span style="font-size: 12px; color: #666;">
-                    Menampilkan: <strong>{len(grouped_ledger_data)} akun</strong>
+                    Menampilkan: <strong>{len(paged_data)} akun</strong> (halaman {page}/{total_pages})
                 </span>
                 <a href="/input_transaksi">
                     <button style="background: #28a745; color: white; border: none; padding: 8px 15px; border-radius: 5px; cursor: pointer; font-size: 12px;">
@@ -3782,6 +3871,9 @@ def buku_besar():
                         💰 Kelola Saldo Awal
                     </button>
                 </a>
+                <button onclick="clearCache()" style="background: #ffc107; color: #212529; border: none; padding: 8px 15px; border-radius: 5px; cursor: pointer; font-size: 12px;">
+                    🗑️ Clear Cache
+                </button>
             </div>
         </div>
         
@@ -3794,6 +3886,9 @@ def buku_besar():
             </div>
             '''}
         </div>
+        
+        <!-- Pagination Controls (Bottom) -->
+        {pagination_html if pagination_html else ''}
     </div>
 
     <style>
@@ -3894,6 +3989,45 @@ def buku_besar():
                 setTimeout(() => {{
                     element.style.backgroundColor = '';
                 }}, 2000);
+            }}
+        }}
+        
+        // Clear cache function
+        function clearCache() {{
+            if (confirm('Clear cache? Akan memperlambat load pertama kali setelah clear.')) {{
+                fetch('/clear_cache')
+                    .then(response => response.json())
+                    .then(data => {{
+                        if (data.success) {{
+                            alert('Cache cleared successfully!');
+                            location.reload();
+                        }} else {{
+                            alert('Failed to clear cache');
+                        }}
+                    }})
+                    .catch(error => {{
+                        console.error('Error:', error);
+                        alert('Error clearing cache');
+                    }});
+            }}
+        }}
+        
+        // Lazy loading untuk entries yang banyak
+        function loadMoreEntries(accountCode) {{
+            const button = document.getElementById('load-more-' + accountCode);
+            const container = document.getElementById('entries-' + accountCode);
+            
+            if (button && container) {{
+                button.textContent = 'Loading...';
+                button.disabled = true;
+                
+                // Simulasi load lebih banyak data
+                setTimeout(() => {{
+                    // Dalam implementasi real, ini akan fetch data tambahan dari server
+                    alert('Fitur load more akan diimplementasi di versi berikutnya');
+                    button.textContent = 'Load More';
+                    button.disabled = false;
+                }}, 500);
             }}
         }}
     </script>
@@ -4012,21 +4146,64 @@ def get_general_ledger_entries(account_code=None, start_date=None, end_date=None
         return []
 
 def create_sample_ledger_data():
-    """Buat data contoh untuk Buku Besar jika belum ada data - DIPERBAIKI"""
+    """Buat data contoh untuk Buku Besar jika belum ada data - OPTIMIZED"""
     try:
-        # Cek apakah sudah ada data transaksi
-        journals_count = supabase.table("general_journals").select("id", count="exact").execute()
+        # ✅ PERBAIKAN: Cek apakah sudah ada data transaksi dengan query yang lebih efisien
+        journals_count_result = supabase.table("general_journals").select("id", count="exact").limit(1).execute()
         
-        if journals_count.count == 0:
-        
+        # Cek count dari result
+        if hasattr(journals_count_result, 'count') and journals_count_result.count > 0:
             logger.info("✅ Ledger data already exists")
             return True
         
+        # Jika tidak ada data, cek dengan cara lain
+        journals_result = supabase.table("general_journals").select("id").limit(1).execute()
+        
+        if journals_result.data and len(journals_result.data) > 0:
+            logger.info("✅ Ledger data already exists (method 2)")
+            return True
+        
+        logger.info("⚠️ No existing ledger data found, but not creating sample automatically")
+        return False
+        
     except Exception as e:
-        logger.error(f"❌ Error creating sample ledger data: {e}")
-        logger.error(traceback.format_exc())
+        logger.error(f"❌ Error checking ledger data: {e}")
         return False
 
+@app.route("/clear_cache")
+@admin_required
+def clear_cache():
+    """Route untuk clear cache manual"""
+    try:
+        cache_cleared = []
+        
+        if hasattr(app, 'ledger_cache'):
+            app.ledger_cache.clear()
+            cache_cleared.append("ledger_cache")
+        
+        if hasattr(app, 'accounts_cache'):
+            app.accounts_cache.clear()
+            cache_cleared.append("accounts_cache")
+        
+        if hasattr(app, 'accounts_cache_full'):
+            app.accounts_cache_full.clear()
+            cache_cleared.append("accounts_cache_full")
+        
+        if hasattr(app, 'tb_cache'):
+            app.tb_cache.clear()
+            cache_cleared.append("tb_cache")
+        
+        logger.info(f"✅ Cache cleared: {', '.join(cache_cleared) if cache_cleared else 'No cache found'}")
+        return jsonify({
+            "success": True, 
+            "message": f"Cache cleared: {', '.join(cache_cleared) if cache_cleared else 'No cache to clear'}",
+            "cleared": cache_cleared
+        })
+        
+    except Exception as e:
+        logger.error(f"❌ Error clearing cache: {e}")
+        return jsonify({"success": False, "message": f"Error clearing cache: {str(e)}"})
+    
 # ============================================================
 # 🧪 11. NERACA SALDO SEBELUM PENYESUAIAN (NSSP)
 # ============================================================
@@ -4381,14 +4558,15 @@ def nssp():
 # ============================================================
 
 def calculate_trial_balance(period=None):
-    """Hitung Neraca Saldo Sebelum Penyesuaian - DIPERBAIKI untuk ambil dari buku besar"""
+    """Hitung Neraca Saldo Sebelum Penyesuaian - OPTIMIZED"""
     try:
-        if not period:
-            # Default ke bulan berjalan
-            current_date = datetime.now()
-            period = current_date.strftime("%Y-%m")
-        
-        logger.info(f"🔄 Calculating trial balance for period: {period} from GENERAL LEDGER")
+        # ✅ PERBAIKAN 1: Gunakan cache sederhana
+        cache_key = f"trial_balance_{period}"
+        if hasattr(app, 'tb_cache'):
+            cache_time, cached_data = app.tb_cache.get(cache_key, (None, None))
+            if cached_data and cache_time and (datetime.now() - cache_time).seconds < 120:  # 2 menit
+                logger.info(f"✅ Using cached trial balance")
+                return cached_data
         
         # Parse periode
         year, month = map(int, period.split('-'))
@@ -4477,12 +4655,15 @@ def calculate_trial_balance(period=None):
         logger.info(f"💰 Total Debit: {total_debit:,}")
         logger.info(f"💰 Total Credit: {total_credit:,}")
         logger.info(f"⚖️ Balance Status: {'BALANCED' if abs(total_debit - total_credit) < 0.01 else 'NOT BALANCED'}")
+
+        if not hasattr(app, 'tb_cache'):
+            app.tb_cache = {}
+        app.tb_cache[cache_key] = (datetime.now(), trial_balance_data)
         
         return trial_balance_data
-        
+    
     except Exception as e:
-        logger.error(f"❌ Error calculating trial balance from ledger: {e}")
-        logger.error(traceback.format_exc())
+        logger.error(f"❌ Error calculating trial balance: {e}")
         return []
     
 def get_trial_balance_summary(trial_balance_data):
